@@ -154,9 +154,3 @@ conda create -n crime-detection-new python=3.10 --no-defaults
 conda activate crime-detection-new
 # Follow installation steps again
 ```
-
-## License
-
-Ho Le Minh Hoang
-0161001726415 - Vietcombank
-Anh Hiển trả em 500k

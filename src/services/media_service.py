@@ -7,6 +7,8 @@ import os
 from fastapi import UploadFile
 
 
+# Data classes to store processing results
+# VideoResult: Stores results of video analysis including detected crimes and confidence scores
 @dataclass
 class VideoResult:
     detected_crimes: List[str]
@@ -16,6 +18,7 @@ class VideoResult:
     output_dir: str
 
 
+# ImageResult: Stores results of image analysis including detected crimes and confidence scores
 @dataclass
 class ImageResult:
     detected_crimes: List[str]
@@ -25,25 +28,30 @@ class ImageResult:
     output_dir: str
 
 
+# ProcessedResult: Stores paths to processed files
 @dataclass
 class ProcessedResult:
     base_path: str
     file_paths: List[str]
 
 
+# Main service class for processing media files and detecting criminal activities
 class MediaService:
+    # Custom confidence thresholds for different types of crimes
+    # Lower thresholds mean higher sensitivity for detection
     CRIME_THRESHOLDS = {
         "vandalism": 0.3,
-        "shooting": 0.4,
-        "explosion": 0.4,
+        "shooting": 0.5,
+        "explosion": 0.5,
         "arrest": 0.1,
         "assault": 0.05,
         "fighting": 0.05,
         "normal videos": 0.1,
-        "road accidents": 0.05,
+        "road accidents": 0.1,
         "robbery": 0.1,
     }
 
+    # List of all possible crime labels that the model can detect
     LABELS = [
         "arrest",
         "assault",
@@ -57,13 +65,13 @@ class MediaService:
     ]
 
     def __init__(self, model_path: str, output_dir: str = "output"):
+        # Initialize YOLO model and create output directory
         self.model_path = model_path
         self.output_dir = output_dir
         self.model = self._initialize_model()
         os.makedirs(output_dir, exist_ok=True)
 
     def _initialize_model(self) -> YOLO:
-        """Initialize the YOLO model"""
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found at {self.model_path}")
         model = YOLO(self.model_path).to("cuda")
@@ -71,13 +79,14 @@ class MediaService:
         return model
 
     async def process_video(
-        self, video_path: str, conf_threshold: float = 0.1
+        self, video_path: str, conf_threshold: float = 0.2
     ) -> VideoResult:
-        """Process video and detect criminal activities"""
+        # Create output directory for processed video
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         video_output_dir = os.path.join(self.output_dir, video_name)
         os.makedirs(video_output_dir, exist_ok=True)
 
+        # Process video frames and get predictions
         frames, predictions, detected_frames = self._process_video_frames(
             video_path, conf_threshold
         )
@@ -85,12 +94,15 @@ class MediaService:
         if not frames:
             raise ValueError("Could not read video or video is empty")
 
+        # Analyze predictions to determine detected crimes and their confidence scores
         detected_crimes, crime_confidences = self._analyze_predictions(
             predictions, len(frames), conf_threshold
         )
 
+        # Save frames where crimes were detected
         self._save_detected_frames(detected_frames, detected_crimes, video_output_dir)
 
+        # Generate a summary frame with detected crimes
         summary_path = self._generate_video_summary(
             frames, detected_crimes, crime_confidences, video_output_dir
         )
@@ -106,7 +118,7 @@ class MediaService:
     def _process_video_frames(
         self, video_path: str, conf_threshold: float
     ) -> Tuple[List[np.ndarray], List[Tuple[int, float]], Dict]:
-        """Process individual frames from the video"""
+        # Initialize video capture and storage for frames and predictions
         cap = cv2.VideoCapture(video_path)
         frames = []
         predictions = []
@@ -115,15 +127,17 @@ class MediaService:
         }
         frame_count = 0
 
+        # Process each frame in the video
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
             frames.append(frame)
-            resized_frame = cv2.resize(frame, (64, 64))
+            resized_frame = cv2.resize(frame, (256, 256))
             results = self.model(resized_frame)
 
+            # Process predictions for current frame
             self._process_frame_predictions(
                 results,
                 frame,
@@ -147,7 +161,7 @@ class MediaService:
         predictions: list,
         detected_frames: dict,
     ):
-        """Process predictions for a single frame with custom thresholds"""
+        # Process model predictions for a single frame
         for r in results:
             probs = r.probs.data.cpu().numpy()
             for cls in range(len(probs)):
@@ -156,6 +170,7 @@ class MediaService:
                 # Use custom threshold for each crime type
                 threshold = self.CRIME_THRESHOLDS.get(label, conf_threshold)
 
+                # Store predictions above threshold
                 if conf > threshold and label != "normal videos":
                     predictions.append((cls, conf))
                     detected_frames[label].append(
@@ -169,21 +184,24 @@ class MediaService:
     def _analyze_predictions(
         self, predictions: list, total_frames: int, conf_threshold: float
     ) -> Tuple[List[str], Dict[str, float]]:
-        """Analyze predictions to determine detected crimes"""
+        # Count occurrences of each crime type
         crime_counts = {label: 0 for label in self.LABELS}
         for cls, _ in predictions:
             crime_counts[self.LABELS[cls]] += 1
 
+        # Calculate ratio of frames containing each crime type
         crime_ratios = {
             label: count / total_frames
             for label, count in crime_counts.items()
             if label != "normal videos"
         }
 
+        # Determine detected crimes based on ratio threshold
         detected_crimes = [
             label for label, ratio in crime_ratios.items() if ratio > conf_threshold
         ]
 
+        # Calculate average confidence for each detected crime
         crime_confidences = {}
         for crime in detected_crimes:
             crime_predictions = [
@@ -199,15 +217,17 @@ class MediaService:
     def _save_detected_frames(
         self, detected_frames: dict, detected_crimes: list, output_dir: str
     ):
-        """Save detected frames for each crime type"""
+        # Save frames where crimes were detected, organized by crime type
         for crime in detected_crimes:
             crime_dir = os.path.join(output_dir, crime)
             os.makedirs(crime_dir, exist_ok=True)
 
+            # Sort frames by confidence score
             sorted_frames = sorted(
                 detected_frames[crime], key=lambda x: x["confidence"], reverse=True
             )
 
+            # Save each frame with confidence score in filename
             for frame_data in sorted_frames:
                 frame_path = os.path.join(
                     crime_dir,
@@ -223,10 +243,10 @@ class MediaService:
         crime_confidences: Dict[str, float],
         output_dir: str,
     ) -> str:
-        """Generate and save summary frame for video"""
+        # Generate a summary frame with detected crimes overlaid
         middle_frame = frames[len(frames) // 2].copy()
 
-        # Add text to summary frame
+        # Prepare text overlay
         text = "NORMAL"
         color = (0, 255, 0)
 
@@ -238,7 +258,7 @@ class MediaService:
             text = "CRIMES: " + ", ".join(crime_texts)
             color = (0, 0, 255)
 
-        # Add text to frame
+        # Add text overlay to frame
         font = cv2.FONT_HERSHEY_SIMPLEX
         (text_width, text_height), _ = cv2.getTextSize(text, font, 1, 2)
 
@@ -252,7 +272,7 @@ class MediaService:
 
         cv2.putText(middle_frame, text, (15, 15 + text_height), font, 1, color, 2)
 
-        # Save summary
+        # Save summary frame
         summary_path = os.path.join(output_dir, "summary.jpg")
         cv2.imwrite(summary_path, middle_frame)
         return summary_path
@@ -260,35 +280,38 @@ class MediaService:
     async def process_image(
         self, image_file: UploadFile, conf_threshold: float = 0.1
     ) -> ImageResult:
-        """Process a single image with custom thresholds"""
+        # Read and process uploaded image file
         contents = await image_file.read()
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("Could not read image file")
 
+        # Create output directory for processed image
         image_name = os.path.splitext(image_file.filename)[0]
         output_dir = os.path.join(self.output_dir, image_name)
         os.makedirs(output_dir, exist_ok=True)
 
-        resized_image = cv2.resize(image, (64, 64))
+        # Get model predictions for the image
+        resized_image = cv2.resize(image, (256, 256))
         results = self.model(resized_image)
 
         detected_crimes = []
         confidences = {}
 
+        # Process predictions using custom thresholds
         for r in results:
             probs = r.probs.data.cpu().numpy()
             for cls in range(len(probs)):
                 conf = float(probs[cls])
                 label = self.LABELS[cls]
-                # Use custom threshold for each crime type
                 threshold = self.CRIME_THRESHOLDS.get(label, conf_threshold)
 
                 if conf > threshold and label != "normal videos":
                     detected_crimes.append(label)
                     confidences[label] = conf
 
+        # Generate processed image with annotations
         processed_path = self._generate_processed_image(
             image, detected_crimes, confidences, output_dir
         )
@@ -302,7 +325,7 @@ class MediaService:
         )
 
     def get_processed_file_path(self, file_name: str) -> ProcessedResult:
-        """Get all processed files for a given input file"""
+        # Get paths to all processed files for a given input file
         base_dir = os.path.join(self.output_dir, file_name)
 
         if not os.path.exists(base_dir):
@@ -326,10 +349,10 @@ class MediaService:
         confidences: Dict[str, float],
         output_dir: str,
     ) -> str:
-        """Generate and save processed image with annotations"""
+        # Generate annotated version of processed image
         processed_image = image.copy()
 
-        # Add text to image
+        # Prepare text overlay
         text = "NORMAL"
         color = (0, 255, 0)
 
@@ -341,7 +364,7 @@ class MediaService:
             text = "CRIMES: " + ", ".join(crime_texts)
             color = (0, 0, 255)
 
-        # Add text to image
+        # Add text overlay to image
         font = cv2.FONT_HERSHEY_SIMPLEX
         (text_width, text_height), _ = cv2.getTextSize(text, font, 1, 2)
 
